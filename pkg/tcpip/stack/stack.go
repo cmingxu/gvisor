@@ -22,6 +22,7 @@ package stack
 import (
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -406,6 +407,18 @@ type Stack struct {
 	// to auto-generate an IPv6 link-local address for newly enabled NICs.
 	// See the AutoGenIPv6LinkLocal field of Options for more details.
 	autoGenIPv6LinkLocal bool
+
+	// uniqueIDGenerator is a generator of unique identifiers.
+	uniqueIDGenerator UniqueID
+
+	// uniqueID is used to generate unique identifiers when
+	// uniqueIDGenerator isn't set.
+	uniqueID uint64
+}
+
+// UniqueID is an abstract generator of unique identifiers.
+type UniqueID interface {
+	UniqueID() uint64
 }
 
 // Options contains optional Stack configuration.
@@ -428,6 +441,9 @@ type Options struct {
 	// should be handled by the stack internally (true) or outside the
 	// stack (false).
 	HandleLocal bool
+
+	// UniqueID is an optional generator of unique identifiers.
+	UniqueID UniqueID
 
 	// NDPConfigs is the NDP configurations used by interfaces.
 	//
@@ -511,9 +527,10 @@ func New(opts Options) *Stack {
 		stats:                opts.Stats.FillIn(),
 		handleLocal:          opts.HandleLocal,
 		icmpRateLimiter:      NewICMPRateLimiter(),
-		portSeed:             generateRandUint32(),
 		ndpConfigs:           opts.NDPConfigs,
 		autoGenIPv6LinkLocal: opts.AutoGenIPv6LinkLocal,
+		portSeed:             generateRandUint32(),
+		uniqueIDGenerator:    opts.UniqueID,
 	}
 
 	// Add specified network protocols.
@@ -538,6 +555,15 @@ func New(opts Options) *Stack {
 	s.demux = newTransportDemuxer(s)
 
 	return s
+}
+
+// UniqueID returns a unique identifier.
+func (s *Stack) UniqueID() uint64 {
+	if s.uniqueIDGenerator != nil {
+		v := s.uniqueIDGenerator.UniqueID()
+		return v
+	}
+	return atomic.AddUint64(&s.uniqueID, 1)
 }
 
 // SetNetworkProtocolOption allows configuring individual protocol level
