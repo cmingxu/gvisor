@@ -21,7 +21,7 @@
 #include <string>
 #include <tuple>
 
-#include "gtest/gtest.h"
+#include "testing/base/public/googletest.h"
 #include "gtest/gtest.h"
 #include "test/syscalls/linux/socket_test_util.h"
 #include "test/util/file_descriptor.h"
