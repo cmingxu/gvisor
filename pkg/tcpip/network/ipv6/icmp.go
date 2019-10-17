@@ -252,9 +252,9 @@ func (e *endpoint) handleICMP(r *stack.Route, netHeader buffer.View, vv buffer.V
 		// scenario is beyond the scope of RFC 4862. As such, we simply
 		// ignore such a scenario for now and proceed as normal.
 		//
-		// TODO(b/140896005): Handle the scenario described above
-		// (inform the netstack integration that a duplicate address was
-		// was detected)
+		// TODO(b/143147598): Handle the scenario described above. Also
+		// inform the netstack integration that a duplicate address was
+		// detected outside of DAD.
 
 		e.linkAddrCache.AddLinkAddress(e.nicid, targetAddr, r.RemoteLinkAddress)
 		if targetAddr != r.RemoteAddress {
