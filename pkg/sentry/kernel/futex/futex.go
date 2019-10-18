@@ -215,6 +215,11 @@ type Waiter struct {
 	// waiterEntry links Waiter into bucket.waiters.
 	waiterEntry
 
+	// nextToWake is used by Wake to form a list of waiters to be woken.
+	// It must be updated/read atomically. It's nil when the waiter is not
+	// on a wake up list.
+	nextToWake AtomicPtrWaiter
+
 	// bucket is the bucket this waiter is queued in. If bucket is nil, the
 	// waiter is not waiting and is not in any bucket.
 	bucket AtomicPtrBucket
@@ -255,11 +260,13 @@ type bucket struct {
 	waiters waiterList `state:"zerovalue"`
 }
 
-// wakeLocked wakes up to n waiters matching the bitmask at the addr for this
-// bucket and returns the number of waiters woken.
+// getWaiters returns up to n waiters matching the bitmask at the addr for this
+// bucket and returns the number of waiters that matched.
 //
 // Preconditions: b.mu must be locked.
-func (b *bucket) wakeLocked(key *Key, bitmask uint32, n int) int {
+func (b *bucket) getWaiters(key *Key, bitmask uint32, n int) (*Waiter, int) {
+	var woken *Waiter
+	var lastWoken *Waiter
 	done := 0
 	for w := b.waiters.Front(); done < n && w != nil; {
 		if !w.key.matches(key) || w.bitmask&bitmask == 0 {
@@ -268,20 +275,54 @@ func (b *bucket) wakeLocked(key *Key, bitmask uint32, n int) int {
 			continue
 		}
 
-		// Remove from the bucket and wake the waiter.
+		// Remove from the bucket and move waiter to the list
+		// of waiters to be woken.
 		woke := w
 		w = w.Next() // Next iteration.
-		b.wakeWaiterLocked(woke)
+		// Remove from the bucket.
+		b.waiters.Remove(woke)
+		// NOTE: Since we've dequeued woke and will never touch it again,
+		// we can safely store nil to woke.bucket here and allow the
+		// WaitComplete() to short-circuit grabbing the bucket lock.
+		woke.bucket.Store(nil)
+		if !woke.nextToWake.CompareAndSwap(nil, woke) {
+			continue
+		}
+		if woken == nil {
+			woken = woke
+			lastWoken = woke
+		} else {
+			// lastWoken.nextToWake should be safe to store as it
+			// could not have been added to another Wake list due to
+			// the CompareAndSwap check above.
+			lastWoken.nextToWake.Store(woke)
+			lastWoken = woke
+		}
 		done++
+	}
+	return woken, done
+
+}
+
+// wakeLocked wakes up to n waiters matching the bitmask at the addr for this
+// bucket and returns the number of waiters woken.
+//
+// Preconditions: b.mu must be locked.
+func (b *bucket) wakeLocked(key *Key, bitmask uint32, n int) int {
+	w, done := b.getWaiters(key, bitmask, n)
+	var prevW *Waiter
+	for i := 0; i < done; i++ {
+		w.C <- struct{}{}
+		prevW = w
+		w = w.nextToWake.Load()
+		prevW.nextToWake.Store(nil)
 	}
 	return done
 }
 
 func (b *bucket) wakeWaiterLocked(w *Waiter) {
-	// Remove from the bucket and wake the waiter.
 	b.waiters.Remove(w)
 	w.C <- struct{}{}
-
 	// NOTE: The above channel write establishes a write barrier according
 	// to the memory model, so nothing may be ordered around it. Since
 	// we've dequeued w and will never touch it again, we can safely
@@ -454,11 +495,18 @@ func (m *Manager) Wake(t Target, addr usermem.Addr, private bool, bitmask uint32
 	}
 
 	b := m.lockBucket(&k)
-	r := b.wakeLocked(&k, bitmask, n)
-
+	w, done := b.getWaiters(&k, bitmask, n)
 	b.mu.Unlock()
 	k.release()
-	return r, nil
+	var prevW *Waiter
+	for i := 0; i < done; i++ {
+		w.C <- struct{}{}
+		prevW = w
+		w = w.nextToWake.Load()
+		prevW.nextToWake.Store(nil)
+	}
+
+	return done, nil
 }
 
 func (m *Manager) doRequeue(t Target, addr, naddr usermem.Addr, private bool, checkval bool, val uint32, nwake int, nreq int) (int, error) {
