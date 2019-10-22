@@ -312,9 +312,9 @@ func (m *machine) Destroy() {
 
 // Get gets an available vCPU.
 func (m *machine) Get() *vCPU {
+	m.mu.RLock()
 	runtime.LockOSThread()
 	tid := procid.Current()
-	m.mu.RLock()
 
 	// Check for an exact match.
 	if c := m.vCPUs[tid]; c != nil {
@@ -325,8 +325,15 @@ func (m *machine) Get() *vCPU {
 
 	// The happy path failed. We now proceed to acquire an exclusive lock
 	// (because the vCPU map may change), and scan all available vCPUs.
+	// In this case, we first unlock the OS thread. Otherwise, if mu is
+	// not available, the current system thread will be parked and a new
+	// system thread spawned. We avoid this situation by simply refreshing
+	// tid after relocking the system thread.
 	m.mu.RUnlock()
+	runtime.UnlockOSThread()
 	m.mu.Lock()
+	runtime.LockOSThread()
+	tid = procid.Current()
 
 	for {
 		// Scan for an available vCPU.
