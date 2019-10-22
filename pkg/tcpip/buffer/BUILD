@@ -6,6 +6,7 @@ package(licenses = ["notice"])
 go_library(
     name = "buffer",
     srcs = [
+        "packet_buffer.go",
         "prependable.go",
         "view.go",
     ],
